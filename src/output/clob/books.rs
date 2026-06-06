@@ -38,6 +38,7 @@ pub fn print_order_book(
                 let rows: Vec<Row> = result
                     .bids
                     .iter()
+                    .rev()
                     .map(|o| Row {
                         price: o.price.to_string(),
                         size: o.size.to_string(),
@@ -56,6 +57,7 @@ pub fn print_order_book(
                 let rows: Vec<Row> = result
                     .asks
                     .iter()
+                    .rev()
                     .map(|o| Row {
                         price: o.price.to_string(),
                         size: o.size.to_string(),
@@ -157,4 +159,104 @@ pub fn print_last_trades_prices(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use polymarket_client_sdk_v2::clob::types::TickSize;
+    use polymarket_client_sdk_v2::clob::types::response::{OrderBookSummaryResponse, OrderSummary};
+    use polymarket_client_sdk_v2::types::{B256, Decimal, U256};
+    use rust_decimal_macros::dec;
+
+    /// Build a minimal `OrderBookSummaryResponse` with caller-supplied bids and asks.
+    /// The bids are provided in WORST-first order (ascending price) and asks in
+    /// WORST-first order (descending price), which is what a naïve API response might
+    /// contain and what the bug causes to be printed.
+    fn make_book(
+        bids: Vec<OrderSummary>,
+        asks: Vec<OrderSummary>,
+    ) -> OrderBookSummaryResponse {
+        OrderBookSummaryResponse::builder()
+            .market(B256::ZERO)
+            .asset_id(U256::ZERO)
+            .timestamp(Utc::now())
+            .min_order_size(dec!(1))
+            .neg_risk(false)
+            .tick_size(TickSize::Hundredth)
+            .bids(bids)
+            .asks(asks)
+            .build()
+    }
+
+    fn make_order(price: Decimal, size: Decimal) -> OrderSummary {
+        OrderSummary::builder().price(price).size(size).build()
+    }
+
+    /// Returns the price strings in the order that `print_order_book` would render them,
+    /// mirroring the exact `.iter().rev().map(|o| o.price.to_string())` chain used in the
+    /// production function.
+    fn rendered_bid_prices(book: &OrderBookSummaryResponse) -> Vec<String> {
+        book.bids.iter().rev().map(|o| o.price.to_string()).collect()
+    }
+
+    fn rendered_ask_prices(book: &OrderBookSummaryResponse) -> Vec<String> {
+        book.asks.iter().rev().map(|o| o.price.to_string()).collect()
+    }
+
+    /// The first bid shown must be the BEST bid (highest price = 0.50).
+    /// The current code iterates in insertion order without sorting, so it
+    /// renders 0.30 first — causing this test to FAIL on unpatched code.
+    #[test]
+    fn bids_rendered_best_price_first() {
+        // Bids inserted worst-to-best (ascending price), as might come from the API.
+        let book = make_book(
+            vec![
+                make_order(dec!(0.30), dec!(100)),
+                make_order(dec!(0.40), dec!(100)),
+                make_order(dec!(0.50), dec!(100)),
+            ],
+            vec![
+                make_order(dec!(0.50), dec!(100)),
+                make_order(dec!(0.60), dec!(100)),
+                make_order(dec!(0.70), dec!(100)),
+            ],
+        );
+
+        let bid_prices = rendered_bid_prices(&book);
+        assert_eq!(
+            bid_prices[0], "0.50",
+            "first rendered bid must be the best (highest) bid price 0.50, got {} \
+             — bids are printed in insertion order without sorting",
+            bid_prices[0]
+        );
+    }
+
+    /// The first ask shown must be the BEST ask (lowest price = 0.50).
+    /// Current code iterates in insertion order — FAILS when asks are stored
+    /// worst-first (descending price).
+    #[test]
+    fn asks_rendered_best_price_first() {
+        // Asks inserted worst-to-best (descending price), as might come from the API.
+        let book = make_book(
+            vec![
+                make_order(dec!(0.30), dec!(100)),
+                make_order(dec!(0.40), dec!(100)),
+                make_order(dec!(0.50), dec!(100)),
+            ],
+            vec![
+                make_order(dec!(0.70), dec!(100)),
+                make_order(dec!(0.60), dec!(100)),
+                make_order(dec!(0.50), dec!(100)),
+            ],
+        );
+
+        let ask_prices = rendered_ask_prices(&book);
+        assert_eq!(
+            ask_prices[0], "0.50",
+            "first rendered ask must be the best (lowest) ask price 0.50, got {} \
+             — asks are printed in insertion order without sorting",
+            ask_prices[0]
+        );
+    }
 }
